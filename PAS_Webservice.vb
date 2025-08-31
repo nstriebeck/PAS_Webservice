@@ -9,6 +9,7 @@ Imports System.Threading
 Imports Newtonsoft.Json
 Imports System.Web
 
+
 Public Class PAS_WebService
     Inherits ServiceBase
 
@@ -75,6 +76,10 @@ Public Class PAS_WebService
                                 datum = request.QueryString("datum")
                             End If
                             html = GetPatientsJSON(datum)
+                            response.ContentType = "application/json"
+                        Case "/api/wartezimmer-anonym"
+                            ' Anonymisierte Daten für öffentliche Anzeige
+                            html = GetAnonymePatientenJSON()
                             response.ContentType = "application/json"
                         Case Else
                             If request.Url.AbsolutePath.StartsWith("/patient/") Then
@@ -302,169 +307,78 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
 
     Private Function GetWaitingRoomHTML() As String
         Try
-            Dim patients As New List(Of Object)
+            Dim html As New StringBuilder()
+            html.AppendLine("<!DOCTYPE html>")
+            html.AppendLine("<html><head>")
+            html.AppendLine("<title>Wartezimmer-Anzeige</title>")
+            html.AppendLine("<meta charset='utf-8'>")
+            html.AppendLine("<meta http-equiv='refresh' content='10'>")
+            html.AppendLine("<style>")
+            html.AppendLine("body { font-family: Arial; margin: 20px; background: #f5f5f5; }")
+            html.AppendLine(".container { max-width: 800px; margin: 0 auto; }")
+            html.AppendLine(".aufruf { background: #4CAF50; color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; text-align: center; }")
+            html.AppendLine(".aufruf h2 { margin: 0; font-size: 36px; }")
+            html.AppendLine(".wartend { background: white; padding: 20px; border-radius: 8px; margin: 10px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }")
+            html.AppendLine(".patnr { font-size: 24px; font-weight: bold; color: #333; }")
+            html.AppendLine(".wartezeit { color: #666; margin-top: 5px; }")
+            html.AppendLine("h1 { text-align: center; color: #333; }")
+            html.AppendLine("</style>")
+            html.AppendLine("</head><body>")
+            html.AppendLine("<div class='container'>")
+            html.AppendLine("<h1>Wartezimmer-Information</h1>")
 
-            ' Daten aus der Datenbank holen
             Using conn As New SqlConnection(ConnectionString)
                 conn.Open()
-                Dim query = "SELECT PatNr, Name, Status, Bereich, Ankunft, Wartezeit, Prioritaet, Bemerkung 
-                        FROM dbo.Warteschlange 
-                        WHERE CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
-                        AND Status IN ('Wartend', 'Aufgerufen', 'InBehandlung')
-                        ORDER BY 
-                            CASE WHEN Status = 'Aufgerufen' THEN 0 ELSE 1 END,
-                            Prioritaet DESC, 
-                            Ankunft"
 
-                Using cmd As New SqlCommand(query, conn)
-                    Using reader = cmd.ExecuteReader()
-                        While reader.Read()
-                            patients.Add(New With {
-                            .PatNr = reader("PatNr").ToString(),
-                            .Name = reader("Name").ToString(),
-                            .Status = reader("Status").ToString(),
-                            .Bereich = reader("Bereich").ToString(),
-                            .Ankunft = Convert.ToDateTime(reader("Ankunft")),
-                            .Wartezeit = Convert.ToInt32(If(IsDBNull(reader("Wartezeit")), 0, reader("Wartezeit"))),
-                            .Prioritaet = Convert.ToInt32(If(IsDBNull(reader("Prioritaet")), 1, reader("Prioritaet"))),
-                            .Bemerkung = reader("Bemerkung").ToString()
-                        })
-                        End While
-                    End Using
+                ' Aufgerufene Patienten
+                Dim cmdAufgerufen As New SqlCommand(
+                "SELECT TOP 1 PatNr, Bereich FROM dbo.Warteschlange 
+                 WHERE Status = 'Aufgerufen' 
+                 AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                 ORDER BY Ankunft DESC", conn)
+
+                Using reader = cmdAufgerufen.ExecuteReader()
+                    If reader.Read() Then
+                        Dim patNr = reader("PatNr").ToString()  ' VOLLE Nummer
+                        Dim zimmer = AnonymisiereZimmer(reader("Bereich").ToString())
+
+                        html.AppendLine("<div class='aufruf'>")
+                        html.AppendLine($"<h2>Patient {patNr}</h2>")
+                        html.AppendLine($"<p style='font-size: 24px;'>Bitte in {zimmer}</p>")
+                        html.AppendLine("</div>")
+                    End If
+                End Using
+
+                ' Wartende Patienten
+                html.AppendLine("<h2>Wartende Patienten:</h2>")
+
+                Dim cmdWartend As New SqlCommand(
+                "SELECT PatNr, Ankunft FROM dbo.Warteschlange 
+                 WHERE Status = 'Wartend' 
+                 AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                 ORDER BY Ankunft", conn)
+
+                Using reader = cmdWartend.ExecuteReader()
+                    While reader.Read()
+                        Dim patNr = reader("PatNr").ToString()  ' VOLLE Nummer
+                        Dim wartezeit = BerechneWartezeit(CDate(reader("Ankunft")))
+
+                        html.AppendLine("<div class='wartend'>")
+                        html.AppendLine($"<div class='patnr'>Patient {patNr}</div>")
+                        html.AppendLine($"<div class='wartezeit'>Wartezeit: ca. {wartezeit}</div>")
+                        html.AppendLine("</div>")
+                    End While
                 End Using
             End Using
 
-            ' Patienten nach Status trennen
-            Dim aufgerufenePatient = patients.FirstOrDefault(Function(p) p.Status = "Aufgerufen")
-            Dim wartendePatients = patients.Where(Function(p) p.Status = "Wartend").ToList()
-
-            Dim html As New StringBuilder()
-            html.AppendLine("<!DOCTYPE html>")
-            html.AppendLine("<html>")
-            html.AppendLine("<head>")
-            html.AppendLine("    <meta charset='utf-8'>")
-            html.AppendLine("    <meta http-equiv='refresh' content='5'>") ' Schnellere Aktualisierung
-            html.AppendLine("    <title>Wartezimmer</title>")
-            html.AppendLine("    <style>")
-            html.AppendLine("        body { font-family: Arial; margin: 0; padding: 20px; background: #f0f0f0; }")
-            html.AppendLine("        h1 { text-align: center; color: #333; font-size: 2.5em; }")
-            html.AppendLine("        .container { max-width: 1200px; margin: 0 auto; }")
-            html.AppendLine("        .patient-call {")
-            html.AppendLine("            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);")
-            html.AppendLine("            color: white;")
-            html.AppendLine("            padding: 40px;")
-            html.AppendLine("            margin: 30px 0;")
-            html.AppendLine("            border-radius: 15px;")
-            html.AppendLine("            text-align: center;")
-            html.AppendLine("            animation: pulse 2s infinite;")
-            html.AppendLine("            box-shadow: 0 10px 30px rgba(0,0,0,0.2);")
-            html.AppendLine("        }")
-            html.AppendLine("        @keyframes pulse {")
-            html.AppendLine("            0% { transform: scale(1); }")
-            html.AppendLine("            50% { transform: scale(1.02); }")
-            html.AppendLine("            100% { transform: scale(1); }")
-            html.AppendLine("        }")
-            html.AppendLine("        .patient-number { font-size: 60px; font-weight: bold; margin-bottom: 15px; }")
-            html.AppendLine("        .room { font-size: 32px; }")
-            html.AppendLine("        .waiting-list { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }")
-            html.AppendLine("        .waiting-item { padding: 15px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }")
-            html.AppendLine("        .waiting-item:last-child { border-bottom: none; }")
-            html.AppendLine("        .patient-info { font-size: 20px; }")
-            html.AppendLine("        .wait-time { color: #666; font-size: 18px; }")
-            html.AppendLine("        .notfall { background: #ff4444; color: white; padding: 5px 10px; border-radius: 5px; font-weight: bold; margin-right: 10px; }")
-            html.AppendLine("        .dringend { background: #ff8800; color: white; padding: 5px 10px; border-radius: 5px; font-weight: bold; margin-right: 10px; }")
-            html.AppendLine("    </style>")
-
-            ' JavaScript für Sound
-            html.AppendLine("    <script>")
-            html.AppendLine("        var lastCallPatient = localStorage.getItem('lastCallPatient') || '';")
-            html.AppendLine("        ")
-            html.AppendLine("        function checkForNewCall() {")
-            html.AppendLine("            var callBox = document.querySelector('.patient-call');")
-            html.AppendLine("            if (callBox) {")
-            html.AppendLine("                var currentPatient = callBox.querySelector('.patient-number').textContent;")
-            html.AppendLine("                if (currentPatient !== lastCallPatient && lastCallPatient !== '') {")
-            html.AppendLine("                    playDingSound();")
-            html.AppendLine("                }")
-            html.AppendLine("                lastCallPatient = currentPatient;")
-            html.AppendLine("                localStorage.setItem('lastCallPatient', currentPatient);")
-            html.AppendLine("            } else {")
-            html.AppendLine("                // Kein Patient in Behandlung")
-            html.AppendLine("                if (lastCallPatient !== '') {")
-            html.AppendLine("                    lastCallPatient = '';")
-            html.AppendLine("                    localStorage.setItem('lastCallPatient', '');")
-            html.AppendLine("                }")
-            html.AppendLine("            }")
-            html.AppendLine("        }")
-            html.AppendLine("        ")
-            html.AppendLine("        function playDingSound() {")
-            ' Einfacher Ding-Sound als Base64
-            html.AppendLine("            var audio = new Audio('data:audio/wav;base64,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');")
-            html.AppendLine("            audio.volume = 0.5;")
-            html.AppendLine("            audio.play().catch(e => console.log('Sound konnte nicht abgespielt werden'));")
-            html.AppendLine("        }")
-            html.AppendLine("        ")
-            html.AppendLine("        window.addEventListener('load', function() {")
-            html.AppendLine("            checkForNewCall();")
-            html.AppendLine("        });")
-            html.AppendLine("    </script>")
-            html.AppendLine("</head>")
-            html.AppendLine("<body>")
-            html.AppendLine("    <div class='container'>")
-            html.AppendLine("        <h1>Wartezimmer-Anzeige</h1>")
-            html.AppendLine("</head>")
-            html.AppendLine("<body>")
-            html.AppendLine("    <div class='container'>")
-            html.AppendLine("        <h1>🏥 Wartezimmer-Anzeige</h1>")
-
-            ' Aufruf-Box
-            If aufgerufenePatient IsNot Nothing Then
-                html.AppendLine("        <div class='patient-call'>")
-                html.AppendLine($"            <div class='patient-number'>Patient {aufgerufenePatient.PatNr}</div>")
-                html.AppendLine($"            <div class='room'>Bitte in {aufgerufenePatient.Bereich}</div>")
-                html.AppendLine("        </div>")
-            End If
-
-            ' Warteliste
-            html.AppendLine("        <div class='waiting-list'>")
-            html.AppendLine("            <h2>⏰ Wartende Patienten:</h2>")
-
-            If wartendePatients.Count = 0 Then
-                html.AppendLine("            <p style='text-align: center; color: #888; font-size: 18px;'>Momentan keine wartenden Patienten</p>")
-            Else
-                Dim position = 1
-                For Each patient In wartendePatients.Take(10)
-                    ' Wartezeit berechnen
-                    Dim ankunftZeit As DateTime = Convert.ToDateTime(patient.Ankunft)
-                    Dim wartezeit = Math.Floor((DateTime.Now - ankunftZeit).TotalMinutes)
-
-                    html.AppendLine("            <div class='waiting-item'>")
-                    html.Append("                <div class='patient-info'>")
-
-                    ' Priorität anzeigen
-                    If patient.Prioritaet = 2 Then
-                        html.Append("<span class='notfall'>NOTFALL</span>")
-                    ElseIf patient.Prioritaet = 1 Then
-                        html.Append("<span class='dringend'>DRINGEND</span>")
-                    End If
-
-                    html.AppendLine($"{position}. Patient {patient.PatNr}</div>")
-                    html.AppendLine($"                <div class='wait-time'>Wartezeit: {wartezeit} Min.</div>")
-                    html.AppendLine("            </div>")
-                    position += 1
-                Next
-            End If
-
-            html.AppendLine("        </div>")
-            html.AppendLine("    </div>")
-            html.AppendLine("</body>")
-            html.AppendLine("</html>")
+            html.AppendLine("</div>")
+            html.AppendLine("</body></html>")
 
             Return html.ToString()
 
         Catch ex As Exception
-            EventLog.WriteEntry("PAS-Service", "GetWaitingRoomHTML Error: " & ex.ToString(), EventLogEntryType.Error)
-            Return "<html><body><h1>Fehler beim Laden der Daten</h1></body></html>"
+            EventLog.WriteEntry("PAS-Service", "GetWaitingRoomHTML Error: {ex.Message}")
+            Return "<html><body><h1>Fehler beim Laden der Wartezimmer-Anzeige</h1></body></html>"
         End Try
     End Function
 
@@ -667,6 +581,75 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
         End Try
     End Function
 
+    Private Function GetAnonymePatientenJSON() As String
+        Try
+            Using conn As New SqlConnection(ConnectionString)
+                conn.Open()
+
+                ' Nur wartende/aufgerufene Patienten
+                Dim query = "SELECT PatNr, Bereich, Ankunft, Status 
+                        FROM dbo.Warteschlange 
+                        WHERE Status IN ('Wartend', 'Aufgerufen')
+                        AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                        ORDER BY Ankunft"
+
+                Using cmd As New SqlCommand(query, conn)
+                    Using reader = cmd.ExecuteReader()
+                        Dim patienten As New List(Of AnonymerPatient)
+                        Dim position = 1
+
+                        While reader.Read()
+                            patienten.Add(New AnonymerPatient With {
+                            .Position = position,
+                            .PatientenNummer = reader("PatNr").ToString(),
+                            .Zimmer = AnonymisiereZimmer(reader("Bereich").ToString()),
+                            .Wartezeit = BerechneWartezeit(CDate(reader("Ankunft")))
+                        })
+                            position += 1
+                        End While
+
+                        Return JsonConvert.SerializeObject(patienten)
+                    End Using
+                End Using
+            End Using
+        Catch ex As Exception
+            EventLog.WriteEntry("PAS-Service", $"Fehler in GetAnonymePatientenJSON: {ex.Message}")
+            Return "[]"
+        End Try
+    End Function
+
+
+
+    ' Neue Hilfsfunktion für Zimmer-Anonymisierung
+    Private Function AnonymisiereZimmer(zimmer As String) As String
+        ' Nur Zimmernummer ohne medizinische Details
+        If zimmer.Contains("-") Then
+            Return zimmer.Split("-"c)(0).Trim()
+        End If
+
+        ' Spezialräume generisch machen
+        Select Case zimmer.ToLower()
+            Case "labor"
+                Return "Zimmer 1"
+            Case "ekg"
+                Return "Zimmer 2"
+            Case "ultraschall"
+                Return "Zimmer 3"
+            Case "röntgen"
+                Return "Zimmer 4"
+            Case "behandlung", "behandlungszimmer"
+                Return "Behandlungszimmer"
+            Case Else
+                Return zimmer
+        End Select
+    End Function
+
+    Private Function BerechneWartezeit(ankunft As DateTime) As String
+        Dim minuten = CInt(Math.Floor((DateTime.Now - ankunft).TotalMinutes))
+        Return $"{minuten} Min."
+    End Function
+
+
 
     Private Function GetPatientsJSON(Optional datum As String = Nothing) As String
         Try
@@ -762,5 +745,13 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
             ServiceBase.Run(ServicesToRun)
         End If
     End Sub
+
+    ' Neue Klasse für anonyme Patienten
+    Private Class AnonymerPatient
+        Public Property Position As Integer
+        Public Property PatientenNummer As String
+        Public Property Zimmer As String
+        Public Property Wartezeit As String
+    End Class
 End Class
 
