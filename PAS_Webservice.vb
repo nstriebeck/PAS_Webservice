@@ -661,29 +661,36 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
                 Dim query As String
 
                 If String.IsNullOrEmpty(datum) Then
-                    ' HEUTE - nur heutige Einträge
+                    ' Ohne Datum-Parameter: nur heute
                     query = "SELECT PatNr, Name, Status, Bereich, Ankunft, Wartezeit, 
-                                Prioritaet, Bemerkung FROM dbo.Warteschlange 
-                                WHERE CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
-                                ORDER BY 
-                                    CASE WHEN Status = 'Fertig' THEN 0 ELSE 1 END,
-                                    Prioritaet DESC, 
-                                    Ankunft"
+                    Prioritaet, Bemerkung FROM dbo.Warteschlange 
+                    WHERE CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                    ORDER BY CASE WHEN Status = 'Fertig' THEN 0 ELSE 1 END,
+                    Prioritaet DESC, Ankunft"
                 Else
-                    ' SPEZIFISCHES DATUM - alle Einträge dieses Tages
+
+                    ' Mit Datum-Parameter: spezifisches Datum
                     query = "SELECT PatNr, Name, Status, Bereich, Ankunft, Wartezeit, 
-                        Prioritaet, Bemerkung FROM dbo.Warteschlange 
-                        WHERE CAST(Ankunft AS DATE) = CAST(@datum AS DATE)
-                        ORDER BY Prioritaet DESC, Ankunft"
+                    Prioritaet, Bemerkung FROM dbo.Warteschlange 
+                    WHERE CAST(Ankunft AS DATE) = @datum
+                    ORDER BY CASE WHEN Status = 'Fertig' THEN 0 ELSE 1 END,
+                    Prioritaet DESC, Ankunft"
                 End If
 
                 Using cmd As New SqlCommand(query, conn)
                     If Not String.IsNullOrEmpty(datum) Then
-                        cmd.Parameters.AddWithValue("@datum", DateTime.Parse(datum))
+                        EventLog.WriteEntry("PAS-Service", $"Datum-Parameter erhalten: {datum}", EventLogEntryType.Information)
+
+                        Dim parsedDate = DateTime.Parse(datum)
+                        EventLog.WriteEntry("PAS-Service", $"Datum geparst als: {parsedDate:yyyy-MM-dd}", EventLogEntryType.Information)
+
+                        cmd.Parameters.AddWithValue("@datum", parsedDate.Date)
                     End If
 
                     Using reader = cmd.ExecuteReader()
+                        Dim count = 0
                         While reader.Read()
+                            count += 1
                             Dim nameRaw = reader("Name").ToString()
                             EventLog.WriteEntry("PAS-Service", $"Name aus DB: {nameRaw} | Bytes: {String.Join(",", Encoding.Default.GetBytes(nameRaw))}", EventLogEntryType.Information)
 
@@ -698,6 +705,7 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
                             .Bemerkung = reader("Bemerkung").ToString()
                         })
                         End While
+                        EventLog.WriteEntry("PAS-Service", $"Query ergab {count} Einträge für Datum {datum}", EventLogEntryType.Information)
                     End Using
                 End Using
             End Using
