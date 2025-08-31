@@ -120,7 +120,7 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
                                             cmd.Parameters.AddWithValue("@ankunft", DateTime.Now)
                                         End If
 
-                                        cmd.Parameters.AddWithValue("@prio", If(formData.ContainsKey("prioritaet"), Integer.Parse(formData("prioritaet")), 1))
+                                        cmd.Parameters.AddWithValue("@prio", If(formData.ContainsKey("prioritaet"), Integer.Parse(formData("prioritaet")), 0))
 
 
                                         cmd.ExecuteNonQuery()
@@ -189,6 +189,7 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
                                 response.StatusCode = 500
                                 EventLog.WriteEntry("PAS-Service", "StatusUpdate Fehler: " & ex.ToString(), EventLogEntryType.Error)
                             End Try
+
                         Case "/api/zimmerwechsel"
                             Try
                                 Dim reader As New StreamReader(request.InputStream)
@@ -216,6 +217,7 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
                                 response.ContentType = "application/json"
                                 response.StatusCode = 500
                             End Try
+
                         Case "/api/updatepatient"
                             Try
                                 Dim reader As New StreamReader(request.InputStream)
@@ -678,10 +680,12 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
                 If String.IsNullOrEmpty(datum) Then
                     ' HEUTE - nur heutige Einträge
                     query = "SELECT PatNr, Name, Status, Bereich, Ankunft, Wartezeit, 
-                        Prioritaet, Bemerkung FROM dbo.Warteschlange 
-                        WHERE Status IN ('Wartend', 'Aufgerufen', 'InBehandlung')
-                        AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
-                        ORDER BY Prioritaet DESC, Ankunft"
+                                Prioritaet, Bemerkung FROM dbo.Warteschlange 
+                                WHERE CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                                ORDER BY 
+                                    CASE WHEN Status = 'Fertig' THEN 0 ELSE 1 END,
+                                    Prioritaet DESC, 
+                                    Ankunft"
                 Else
                     ' SPEZIFISCHES DATUM - alle Einträge dieses Tages
                     query = "SELECT PatNr, Name, Status, Bereich, Ankunft, Wartezeit, 
