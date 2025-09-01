@@ -223,6 +223,95 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
                                 response.StatusCode = 500
                             End Try
 
+                        Case "/api/checkin"
+                            Try
+                                Dim reader As New StreamReader(request.InputStream)
+                                Dim postData = reader.ReadToEnd()
+                                Dim formData = ParseFormData(postData)
+
+                                Using conn As New SqlConnection(ConnectionString)
+                                    conn.Open()
+
+                                    ' Wartezeit auf 0 und Ankunft auf jetzt setzen
+                                    Dim query = "UPDATE dbo.Warteschlange 
+                        SET Status = 'Wartend',
+                            Ankunft = @ankunft,
+                            Wartezeit = 0
+                        WHERE PatNr = @patnr"
+
+                                    Using cmd As New SqlCommand(query, conn)
+                                        cmd.Parameters.AddWithValue("@patnr", formData("patientenID"))
+                                        cmd.Parameters.AddWithValue("@ankunft", DateTime.Parse(formData("ankunftszeit")))
+
+                                        Dim rowsAffected = cmd.ExecuteNonQuery()
+
+                                        If rowsAffected > 0 Then
+                                            EventLog.WriteEntry("PAS-Service",
+                                                $"Check-In: Patient {formData("patientenID")} - Wartezeit auf 0 gesetzt",
+                                                EventLogEntryType.Information)
+                                            html = "{""success"": true, ""message"": ""Check-In erfolgreich""}"
+                                        Else
+                                            html = "{""success"": false, ""message"": ""Patient nicht gefunden""}"
+                                            response.StatusCode = 404
+                                        End If
+                                    End Using
+                                End Using
+
+                                response.ContentType = "application/json"
+
+                            Catch ex As Exception
+                                html = "{""success"": false, ""error"": """ & ex.Message.Replace("""", "'") & """}"
+                                response.ContentType = "application/json"
+                                response.StatusCode = 500
+                                EventLog.WriteEntry("PAS-Service", "Check-In Fehler: " & ex.ToString(), EventLogEntryType.Error)
+                            End Try
+
+                        Case "/api/aufgerufene"
+                            Try
+                                Dim aufgerufene As New List(Of Object)
+
+                                Using conn As New SqlConnection(ConnectionString)
+                                    conn.Open()
+
+                                    ' Alle aufgerufenen und in Behandlung befindlichen Patienten
+                                    Dim query = "SELECT PatNr, Name, Bereich, Status, Aufgerufen, Prioritaet,
+                               CASE WHEN Prioritaet = 2 THEN 'Notfall' 
+                                    WHEN Prioritaet = 1 THEN 'Dringend'
+                                    ELSE 'Normal' END as PrioritaetText
+                        FROM dbo.Warteschlange 
+                        WHERE Status IN ('Aufgerufen', 'InBehandlung')
+                          AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                          AND (Aufgerufen IS NULL OR Aufgerufen > DATEADD(minute, -30, GETDATE()))
+                        ORDER BY Aufgerufen DESC"
+
+                                    Using cmd As New SqlCommand(query, conn)
+                                        Using reader = cmd.ExecuteReader()
+                                            While reader.Read()
+                                                aufgerufene.Add(New With {
+                                                    .PatientenID = reader("PatNr").ToString(),
+                                                    .Name = reader("Name").ToString(),
+                                                    .Zimmer = reader("Bereich").ToString(),
+                                                    .Status = reader("Status").ToString(),
+                                                    .Aufrufzeit = If(IsDBNull(reader("Aufgerufen")),
+                                                                   DateTime.Now,
+                                                                   Convert.ToDateTime(reader("Aufgerufen"))),
+                                                    .Prioritaet = reader("PrioritaetText").ToString()
+                                                })
+                                            End While
+                                        End Using
+                                    End Using
+                                End Using
+
+                                html = JsonConvert.SerializeObject(aufgerufene)
+                                response.ContentType = "application/json"
+
+                            Catch ex As Exception
+                                html = "{""error"": """ & ex.Message.Replace("""", "'") & """}"
+                                response.ContentType = "application/json"
+                                response.StatusCode = 500
+                                EventLog.WriteEntry("PAS-Service", "Fehler bei /api/aufgerufene: " & ex.ToString(), EventLogEntryType.Error)
+                            End Try
+
                         Case "/api/updatepatient"
                             Try
                                 Dim reader As New StreamReader(request.InputStream)
@@ -312,72 +401,120 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
             html.AppendLine("<html><head>")
             html.AppendLine("<title>Wartezimmer-Anzeige</title>")
             html.AppendLine("<meta charset='utf-8'>")
-            html.AppendLine("<meta http-equiv='refresh' content='10'>")
+            html.AppendLine("<meta http-equiv='refresh' content='5'>") ' Schnellere Updates
             html.AppendLine("<style>")
-            html.AppendLine("body { font-family: Arial; margin: 20px; background: #f5f5f5; }")
-            html.AppendLine(".container { max-width: 800px; margin: 0 auto; }")
-            html.AppendLine(".aufruf { background: #4CAF50; color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; text-align: center; }")
-            html.AppendLine(".aufruf h2 { margin: 0; font-size: 36px; }")
-            html.AppendLine(".wartend { background: white; padding: 20px; border-radius: 8px; margin: 10px 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }")
-            html.AppendLine(".patnr { font-size: 24px; font-weight: bold; color: #333; }")
-            html.AppendLine(".wartezeit { color: #666; margin-top: 5px; }")
-            html.AppendLine("h1 { text-align: center; color: #333; }")
+            html.AppendLine("body { font-family: 'Segoe UI', Arial; margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }")
+            html.AppendLine(".container { max-width: 1400px; margin: 0 auto; }")
+            html.AppendLine(".header { text-align: center; color: white; margin-bottom: 30px; }")
+            html.AppendLine(".header h1 { font-size: 3em; margin: 0; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }")
+            html.AppendLine(".aufrufe-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; margin-bottom: 40px; }")
+            html.AppendLine(".aufruf-card { background: white; padding: 25px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); position: relative; overflow: hidden; }")
+            html.AppendLine(".aufruf-card.notfall { animation: notfallPulse 1.5s infinite; border: 3px solid #ff0000; }")
+            html.AppendLine("@keyframes notfallPulse { 0%, 100% { background: white; } 50% { background: #ffe0e0; } }")
+            html.AppendLine(".patient-nummer { font-size: 2.5em; font-weight: bold; color: #333; text-align: center; margin: 15px 0; }")
+            html.AppendLine(".zimmer-info { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; text-align: center; font-size: 1.5em; }")
+            html.AppendLine(".bereich-label { position: absolute; top: 10px; right: 10px; padding: 5px 15px; border-radius: 20px; font-size: 0.9em; font-weight: bold; color: white; }")
+            html.AppendLine(".bereich-labor { background: #9f7aea; }")
+            html.AppendLine(".bereich-ekg { background: #4299e1; }")
+            html.AppendLine(".bereich-roentgen { background: #ed8936; }")
+            html.AppendLine(".bereich-behandlung { background: #48bb78; }")
+            html.AppendLine(".wartende-section { background: white; padding: 30px; border-radius: 15px; margin-top: 30px; }")
+            html.AppendLine(".wartend-item { display: flex; justify-content: space-between; padding: 15px; margin: 10px 0; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #667eea; }")
+            html.AppendLine(".keine-aufrufe { text-align: center; color: white; font-size: 1.5em; padding: 50px; }")
+            html.AppendLine(".clock { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.3); color: white; padding: 10px 20px; border-radius: 10px; font-size: 1.3em; }")
             html.AppendLine("</style>")
             html.AppendLine("</head><body>")
+            html.AppendLine("<div class='clock' id='clock'></div>")
             html.AppendLine("<div class='container'>")
-            html.AppendLine("<h1>Wartezimmer-Information</h1>")
+            html.AppendLine("<div class='header'><h1>Patientenaufruf</h1></div>")
 
             Using conn As New SqlConnection(ConnectionString)
                 conn.Open()
 
-                ' Aufgerufene Patienten
+                ' Alle aufgerufenen Patienten (können mehrere sein!)
+                html.AppendLine("<div class='aufrufe-grid'>")
+
                 Dim cmdAufgerufen As New SqlCommand(
-                "SELECT TOP 1 PatNr, Bereich FROM dbo.Warteschlange 
-                 WHERE Status = 'Aufgerufen' 
+                "SELECT PatNr, Bereich, Prioritaet, Aufgerufen 
+                 FROM dbo.Warteschlange 
+                 WHERE Status IN ('Aufgerufen', 'InBehandlung')
                  AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
-                 ORDER BY Ankunft DESC", conn)
+                 ORDER BY Aufgerufen DESC", conn)
 
+                Dim hatAufrufe = False
                 Using reader = cmdAufgerufen.ExecuteReader()
-                    If reader.Read() Then
-                        Dim patNr = reader("PatNr").ToString()  ' VOLLE Nummer
-                        Dim zimmer = AnonymisiereZimmer(reader("Bereich").ToString())
-
-                        html.AppendLine("<div class='aufruf'>")
-                        html.AppendLine($"<h2>Patient {patNr}</h2>")
-                        html.AppendLine($"<p style='font-size: 24px;'>Bitte in {zimmer}</p>")
-                        html.AppendLine("</div>")
-                    End If
-                End Using
-
-                ' Wartende Patienten
-                html.AppendLine("<h2>Wartende Patienten:</h2>")
-
-                Dim cmdWartend As New SqlCommand(
-                "SELECT PatNr, Ankunft FROM dbo.Warteschlange 
-                 WHERE Status = 'Wartend' 
-                 AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
-                 ORDER BY Ankunft", conn)
-
-                Using reader = cmdWartend.ExecuteReader()
                     While reader.Read()
-                        Dim patNr = reader("PatNr").ToString()  ' VOLLE Nummer
-                        Dim wartezeit = BerechneWartezeit(CDate(reader("Ankunft")))
+                        hatAufrufe = True
+                        Dim patNr = reader("PatNr").ToString()
+                        Dim zimmer = reader("Bereich").ToString()
+                        Dim prioritaet = Convert.ToInt32(If(IsDBNull(reader("Prioritaet")), 0, reader("Prioritaet")))
+                        Dim notfallClass = If(prioritaet = 2, "notfall", "")
+                        Dim bereichClass = GetBereichClass(zimmer)
 
-                        html.AppendLine("<div class='wartend'>")
-                        html.AppendLine($"<div class='patnr'>Patient {patNr}</div>")
-                        html.AppendLine($"<div class='wartezeit'>Wartezeit: ca. {wartezeit}</div>")
+                        html.AppendLine($"<div class='aufruf-card {notfallClass}'>")
+                        If bereichClass <> "" Then
+                            html.AppendLine($"<div class='bereich-label {bereichClass}'>{GetBereichName(zimmer)}</div>")
+                        End If
+                        html.AppendLine($"<div class='patient-nummer'>Patient {patNr}</div>")
+                        html.AppendLine($"<div class='zimmer-info'>→ {zimmer}</div>")
                         html.AppendLine("</div>")
                     End While
                 End Using
+
+                If Not hatAufrufe Then
+                    html.AppendLine("<div class='keine-aufrufe'>Keine aktuellen Aufrufe</div>")
+                End If
+
+                html.AppendLine("</div>") ' Ende aufrufe-grid
+
+                ' Wartende Patienten in kompakter Liste
+                html.AppendLine("<div class='wartende-section'>")
+                html.AppendLine("<h2 style='color: #333; margin-bottom: 20px;'>Wartende Patienten</h2>")
+
+                Dim cmdWartend As New SqlCommand(
+                "SELECT PatNr, Ankunft, Prioritaet 
+                 FROM dbo.Warteschlange 
+                 WHERE Status = 'Wartend' 
+                 AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                 ORDER BY Prioritaet DESC, Ankunft", conn)
+
+                Using reader = cmdWartend.ExecuteReader()
+                    Dim position = 1
+                    While reader.Read()
+                        Dim patNr = reader("PatNr").ToString()
+                        Dim wartezeit = BerechneWartezeit(CDate(reader("Ankunft")))
+                        Dim prioritaet = Convert.ToInt32(If(IsDBNull(reader("Prioritaet")), 0, reader("Prioritaet")))
+                        Dim prioText = If(prioritaet = 2, " 🚨", If(prioritaet = 1, " ⚠️", ""))
+
+                        html.AppendLine("<div class='wartend-item'>")
+                        html.AppendLine($"<div><strong>#{position}</strong> Patient {patNr}{prioText}</div>")
+                        html.AppendLine($"<div>Wartezeit: {wartezeit}</div>")
+                        html.AppendLine("</div>")
+                        position += 1
+                    End While
+                End Using
+
+                html.AppendLine("</div>") ' Ende wartende-section
             End Using
 
-            html.AppendLine("</div>")
-            html.AppendLine("</body></html>")
+            html.AppendLine("</div>") ' Ende container
 
+            ' JavaScript für Uhr
+            html.AppendLine("<script>")
+            html.AppendLine("function updateClock() {")
+            html.AppendLine("  const now = new Date();")
+            html.AppendLine("  document.getElementById('clock').textContent = ")
+            html.AppendLine("    now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });")
+            html.AppendLine("}")
+            html.AppendLine("updateClock();")
+            html.AppendLine("setInterval(updateClock, 1000);")
+            html.AppendLine("</script>")
+
+            html.AppendLine("</body></html>")
             Return html.ToString()
 
         Catch ex As Exception
-            EventLog.WriteEntry("PAS-Service", "GetWaitingRoomHTML Error: {ex.Message}")
+            EventLog.WriteEntry("PAS-Service", "GetWaitingRoomHTML Error: " & ex.Message)
             Return "<html><body><h1>Fehler beim Laden der Wartezimmer-Anzeige</h1></body></html>"
         End Try
     End Function
@@ -753,6 +890,26 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
             ServiceBase.Run(ServicesToRun)
         End If
     End Sub
+
+    ' Hilfsfunktionen für Bereichs-Styling
+    Private Function GetBereichClass(zimmer As String) As String
+        Dim zimmerLower = zimmer.ToLower()
+        If zimmerLower.Contains("labor") Then Return "bereich-labor"
+        If zimmerLower.Contains("ekg") Then Return "bereich-ekg"
+        If zimmerLower.Contains("röntgen") OrElse zimmerLower.Contains("roentgen") Then Return "bereich-roentgen"
+        If zimmerLower.Contains("behandlung") Then Return "bereich-behandlung"
+        Return ""
+    End Function
+
+    Private Function GetBereichName(zimmer As String) As String
+        Dim zimmerLower = zimmer.ToLower()
+        If zimmerLower.Contains("labor") Then Return "LABOR"
+        If zimmerLower.Contains("ekg") Then Return "EKG"
+        If zimmerLower.Contains("röntgen") OrElse zimmerLower.Contains("roentgen") Then Return "RÖNTGEN"
+        If zimmerLower.Contains("behandlung") Then Return "BEHANDLUNG"
+        If zimmerLower.Contains("zimmer") Then Return "ZIMMER"
+        Return "AUFRUF"
+    End Function
 
     ' Neue Klasse für anonyme Patienten
     Private Class AnonymerPatient
