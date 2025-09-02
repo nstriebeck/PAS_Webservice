@@ -401,8 +401,9 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
             html.AppendLine("<html><head>")
             html.AppendLine("<title>Wartezimmer-Anzeige</title>")
             html.AppendLine("<meta charset='utf-8'>")
-            html.AppendLine("<meta http-equiv='refresh' content='5'>") ' Schnellere Updates
+            html.AppendLine("<meta http-equiv='refresh' content='5'>")
             html.AppendLine("<style>")
+            ' ... Ihr CSS bleibt gleich ...
             html.AppendLine("body { font-family: 'Segoe UI', Arial; margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }")
             html.AppendLine(".container { max-width: 1400px; margin: 0 auto; }")
             html.AppendLine(".header { text-align: center; color: white; margin-bottom: 30px; }")
@@ -424,97 +425,142 @@ VALUES (@patnr, @name, @status, @bereich, @ankunft, @prio, @bemerkung, 0)"
             html.AppendLine(".clock { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.3); color: white; padding: 10px 20px; border-radius: 10px; font-size: 1.3em; }")
             html.AppendLine("</style>")
             html.AppendLine("</head><body>")
+
             html.AppendLine("<div class='clock' id='clock'></div>")
             html.AppendLine("<div class='container'>")
-            html.AppendLine("<div class='header'><h1>Patientenaufruf</h1></div>")
+            html.AppendLine("<div class='header'>")
+            html.AppendLine("<h1>Patientenaufruf</h1>")
+            html.AppendLine("</div>")
+
+            html.AppendLine("<div class='aufrufe-grid'>")
 
             Using conn As New SqlConnection(ConnectionString)
                 conn.Open()
 
-                ' Alle aufgerufenen Patienten (können mehrere sein!)
-                html.AppendLine("<div class='aufrufe-grid'>")
+                ' *** HIER IST DER WICHTIGE FIX ***
+                ' Nur die neuesten Einträge pro Patient mit ROW_NUMBER()
+                Dim query = "
+                SELECT PatNr, Bereich, Status, Prioritaet 
+                FROM (
+                    SELECT PatNr, Bereich, Status, Prioritaet,
+                           ROW_NUMBER() OVER (PARTITION BY PatNr ORDER BY 
+                               CASE 
+                                   WHEN Aufgerufen IS NOT NULL THEN Aufgerufen
+                                   WHEN Behandlungsbeginn IS NOT NULL THEN Behandlungsbeginn
+                                   ELSE Ankunft 
+                               END DESC) as rn
+                    FROM dbo.Warteschlange 
+                    WHERE Status IN ('Aufgerufen', 'InBehandlung') 
+                    AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                ) ranked
+                WHERE rn = 1
+                ORDER BY PatNr"
 
-                Dim cmdAufgerufen As New SqlCommand(
-                "SELECT PatNr, Bereich, Prioritaet, Aufgerufen 
-                 FROM dbo.Warteschlange 
-                 WHERE Status IN ('Aufgerufen', 'InBehandlung')
-                 AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
-                 ORDER BY Aufgerufen DESC", conn)
+                Using cmd As New SqlCommand(query, conn)
+                    Using reader = cmd.ExecuteReader()
+                        Dim cardCount = 0
 
-                Dim hatAufrufe = False
-                Using reader = cmdAufgerufen.ExecuteReader()
-                    While reader.Read()
-                        hatAufrufe = True
-                        Dim patNr = reader("PatNr").ToString()
-                        Dim zimmer = reader("Bereich").ToString()
-                        Dim prioritaet = Convert.ToInt32(If(IsDBNull(reader("Prioritaet")), 0, reader("Prioritaet")))
-                        Dim notfallClass = If(prioritaet = 2, "notfall", "")
-                        Dim bereichClass = GetBereichClass(zimmer)
+                        While reader.Read()
+                            Dim patNr = reader("PatNr").ToString()
+                            Dim bereich = reader("Bereich").ToString()
+                            Dim status = reader("Status").ToString()
+                            Dim prioritaet = CInt(If(IsDBNull(reader("Prioritaet")), 0, reader("Prioritaet")))
 
-                        html.AppendLine($"<div class='aufruf-card {notfallClass}'>")
-                        If bereichClass <> "" Then
-                            html.AppendLine($"<div class='bereich-label {bereichClass}'>{GetBereichName(zimmer)}</div>")
+                            cardCount += 1
+
+                            ' Card generieren
+                            html.AppendLine($"<div class='aufruf-card {If(prioritaet = 2, "notfall", "")}'>")
+
+                            ' Bereich-Label basierend auf Status
+                            Dim labelClass = ""
+                            Dim labelText = ""
+
+                            Select Case status
+                                Case "Aufgerufen"
+                                    labelClass = "bereich-ekg"
+                                    labelText = "AUFRUF"
+                                Case "InBehandlung"
+                                    labelClass = "bereich-behandlung"
+                                    labelText = "BEHANDLUNG"
+                            End Select
+
+                            If Not String.IsNullOrEmpty(labelClass) Then
+                                html.AppendLine($"<div class='bereich-label {labelClass}'>{labelText}</div>")
+                            End If
+
+                            html.AppendLine($"<div class='patient-nummer'>Patient {patNr}</div>")
+                            html.AppendLine($"<div class='zimmer-info'>→ {bereich}</div>")
+                            html.AppendLine("</div>")
+                        End While
+
+                        ' Wenn keine Aufrufe vorhanden
+                        If cardCount = 0 Then
+                            html.AppendLine("<div class='keine-aufrufe'>")
+                            html.AppendLine("Aktuell keine Patientenaufrufe")
+                            html.AppendLine("</div>")
                         End If
-                        html.AppendLine($"<div class='patient-nummer'>Patient {patNr}</div>")
-                        html.AppendLine($"<div class='zimmer-info'>→ {zimmer}</div>")
-                        html.AppendLine("</div>")
-                    End While
+                    End Using
                 End Using
-
-                If Not hatAufrufe Then
-                    html.AppendLine("<div class='keine-aufrufe'>Keine aktuellen Aufrufe</div>")
-                End If
-
-                html.AppendLine("</div>") ' Ende aufrufe-grid
-
-                ' Wartende Patienten in kompakter Liste
-                html.AppendLine("<div class='wartende-section'>")
-                html.AppendLine("<h2 style='color: #333; margin-bottom: 20px;'>Wartende Patienten</h2>")
-
-                Dim cmdWartend As New SqlCommand(
-                "SELECT PatNr, Ankunft, Prioritaet 
-                 FROM dbo.Warteschlange 
-                 WHERE Status = 'Wartend' 
-                 AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
-                 ORDER BY Prioritaet DESC, Ankunft", conn)
-
-                Using reader = cmdWartend.ExecuteReader()
-                    Dim position = 1
-                    While reader.Read()
-                        Dim patNr = reader("PatNr").ToString()
-                        Dim wartezeit = BerechneWartezeit(CDate(reader("Ankunft")))
-                        Dim prioritaet = Convert.ToInt32(If(IsDBNull(reader("Prioritaet")), 0, reader("Prioritaet")))
-                        Dim prioText = If(prioritaet = 2, " 🚨", If(prioritaet = 1, " ⚠️", ""))
-
-                        html.AppendLine("<div class='wartend-item'>")
-                        html.AppendLine($"<div><strong>#{position}</strong> Patient {patNr}{prioText}</div>")
-                        html.AppendLine($"<div>Wartezeit: {wartezeit}</div>")
-                        html.AppendLine("</div>")
-                        position += 1
-                    End While
-                End Using
-
-                html.AppendLine("</div>") ' Ende wartende-section
             End Using
 
-            html.AppendLine("</div>") ' Ende container
+            html.AppendLine("</div>")
+
+            ' Wartende Patienten
+            html.AppendLine("<div class='wartende-section'>")
+            html.AppendLine("<h2 style='color: #333; margin-bottom: 20px;'>Wartende Patienten</h2>")
+
+            Using conn As New SqlConnection(ConnectionString)
+                conn.Open()
+
+                ' Auch hier Duplikat-Schutz für wartende Patienten
+                Dim queryWartend = "
+                SELECT PatNr, Ankunft
+                FROM (
+                    SELECT PatNr, Ankunft,
+                           ROW_NUMBER() OVER (PARTITION BY PatNr ORDER BY Ankunft DESC) as rn
+                    FROM dbo.Warteschlange 
+                    WHERE Status = 'Wartend' 
+                    AND CAST(Ankunft AS DATE) = CAST(GETDATE() AS DATE)
+                ) ranked
+                WHERE rn = 1
+                ORDER BY Ankunft"
+
+                Using cmd As New SqlCommand(queryWartend, conn)
+                    Using reader = cmd.ExecuteReader()
+                        While reader.Read()
+                            Dim patNr = reader("PatNr").ToString()
+                            Dim wartezeit = BerechneWartezeit(CDate(reader("Ankunft")))
+
+                            html.AppendLine("<div class='wartend-item'>")
+                            html.AppendLine($"<span>Patient {patNr}</span>")
+                            html.AppendLine($"<span>Wartezeit: {wartezeit}</span>")
+                            html.AppendLine("</div>")
+                        End While
+                    End Using
+                End Using
+            End Using
+
+            html.AppendLine("</div>")
+            html.AppendLine("</div>")
 
             ' JavaScript für Uhr
             html.AppendLine("<script>")
             html.AppendLine("function updateClock() {")
-            html.AppendLine("  const now = new Date();")
-            html.AppendLine("  document.getElementById('clock').textContent = ")
-            html.AppendLine("    now.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });")
+            html.AppendLine("    const now = new Date();")
+            html.AppendLine("    document.getElementById('clock').textContent = now.toLocaleTimeString('de-DE', {")
+            html.AppendLine("        hour: '2-digit', minute: '2-digit', second: '2-digit'")
+            html.AppendLine("    });")
             html.AppendLine("}")
             html.AppendLine("updateClock();")
             html.AppendLine("setInterval(updateClock, 1000);")
             html.AppendLine("</script>")
 
             html.AppendLine("</body></html>")
+
             Return html.ToString()
 
         Catch ex As Exception
-            EventLog.WriteEntry("PAS-Service", "GetWaitingRoomHTML Error: " & ex.Message)
+            EventLog.WriteEntry("PAS-Service", $"GetWaitingRoomHTML Error: {ex.Message}", EventLogEntryType.Error)
             Return "<html><body><h1>Fehler beim Laden der Wartezimmer-Anzeige</h1></body></html>"
         End Try
     End Function
